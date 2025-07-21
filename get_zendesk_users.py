@@ -59,3 +59,5 @@ if __name__ == '__main__':
         json.dump(usuarios, f, indent=2, ensure_ascii=False)
 
     print(f'✅ Se guardaron {len(usuarios)} usuarios en: {OUTPUT_FILENAME}')
+
+#prueba para mostrar cambios
