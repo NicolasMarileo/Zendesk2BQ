@@ -2,7 +2,7 @@ import os
 import requests
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from google.cloud import storage, bigquery
 from google.auth.exceptions import DefaultCredentialsError
@@ -17,26 +17,20 @@ ZENDESK_API_TOKEN = os.getenv('ZENDESK_API_TOKEN')
 GCP_PROJECT_ID = os.getenv('GCP_PROJECT_ID')
 BUCKET_NAME = os.getenv('BUCKET_NAME')
 
-# === VALIDACIÓN DE VARIABLES ===
 if not all([ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_API_TOKEN, GCP_PROJECT_ID, BUCKET_NAME]):
     raise EnvironmentError("⚠️ Faltan variables de entorno. Verifica tu archivo .env")
 
-# === CONFIGURACIÓN DE FECHAS ===
-ayer_utc = datetime.now(timezone.utc) - timedelta(days=1)
-ayer_utc = ayer_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-start_time = int(ayer_utc.timestamp())
-storage_filename = f'usuarios_incrementales_{ayer_utc.strftime("%Y%m%d")}.json'
+# === CONFIGURACIÓN GENERAL ===
+fecha_hoy = datetime.now(timezone.utc).strftime("%Y%m%d")
+storage_filename = f'usuarios_completos_{fecha_hoy}.json'
 bq_table = 'testbigquerydimarsa.Zendesk.Usuarios'
-
-# === URL INICIAL DEL ENDPOINT INCREMENTAL ===
-#base_url = f'https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/incremental/users.json?start_time={start_time}'
-base_url = f'https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/incremental/users.json?start_time=0'
+base_url = f'https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users.json?page[size]=100'
 auth = (f'{ZENDESK_EMAIL}/token', ZENDESK_API_TOKEN)
 
-# === FUNCIÓN PARA CONSULTAR DATOS CON CURSOR-BASED PAGINATION ===
-def obtener_usuarios_incrementales():
+# === CONSULTA CON CURSOR PAGINATION ===
+def obtener_todos_los_usuarios():
     todos = []
-    url_actual = base_url
+    url_actual = base_url  # e.g. ".../users.json?page[size]=100"
     pagina = 1
 
     while url_actual:
@@ -47,28 +41,39 @@ def obtener_usuarios_incrementales():
             data = response.json()
             todos.extend(data.get('users', []))
 
-            if data.get('end_of_stream', False):
-                break
+            # Paginación con cursor
+            if data.get('meta', {}).get('has_more', False):
+                url_actual = data.get('links', {}).get('next')
+            else:
+                url_actual = None
 
-            url_actual = data.get('next_page')
             pagina += 1
-            time.sleep(0.3)
+            time.sleep(0.5)
+
+        elif response.status_code == 429:
+            retry = int(response.headers.get('Retry-After', 60))
+            print(f'⏳ Rate limit. Esperando {retry}s...')
+            time.sleep(retry)
+
         else:
             print(f'❌ Error {response.status_code}: {response.text}')
             break
 
     return todos
 
-# === SUBE A CLOUD STORAGE ===
+# === SUBE NDJSON A CLOUD STORAGE ===
 def subir_a_storage(bucket_name: str, nombre_archivo: str, lista_json: list, project_id: str):
-    print(f'☁️ Subiendo archivo NDJSON a GCS: {bucket_name}/{nombre_archivo}')
+    print(f'☁️ Subiendo respaldo NDJSON a GCS: {bucket_name}/{nombre_archivo}')
     try:
         storage_client = storage.Client(project=project_id)
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(nombre_archivo)
 
-        ndjson_content = '\n'.join(json.dumps(obj, ensure_ascii=False) for obj in lista_json)
-        blob.upload_from_string(data=ndjson_content, content_type='application/x-ndjson')
+        ndjson = '\n'.join(json.dumps(obj, ensure_ascii=False) for obj in lista_json)
+        blob.upload_from_string(
+            data=ndjson,
+            content_type='application/x-ndjson'
+        )
         print('✅ Archivo NDJSON subido exitosamente.')
     except DefaultCredentialsError:
         print("❌ Error de credenciales. Ejecuta 'gcloud auth application-default login'.")
@@ -85,7 +90,7 @@ def cargar_a_bigquery_desde_ndjson(lista_json: list, table_id: str, project_id: 
     job_config = bigquery.LoadJobConfig(
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        ignore_unknown_values=True  # <<< clave
+        ignore_unknown_values=True  # 🔐 IGNORA CAMPOS EXTRA
     )
 
     load_job = client.load_table_from_file(
@@ -94,16 +99,16 @@ def cargar_a_bigquery_desde_ndjson(lista_json: list, table_id: str, project_id: 
         job_config=job_config
     )
     load_job.result()
-    print('✅ Carga a BigQuery completada.')
+    print('✅ Carga completada.')
 
     table = client.get_table(table_id)
     print(f'📊 Filas totales en la tabla: {table.num_rows}')
 
 # === MAIN ===
 def main():
-    print(f'🚀 Consultando usuarios modificados desde: {ayer_utc.isoformat()}')
-    usuarios = obtener_usuarios_incrementales()
-    print(f'📦 Total de usuarios incrementales: {len(usuarios)}')
+    print('🚀 Consultando TODOS los usuarios de Zendesk...')
+    usuarios = obtener_todos_los_usuarios()
+    print(f'📦 Total de usuarios obtenidos: {len(usuarios)}')
 
     if usuarios:
         subir_a_storage(BUCKET_NAME, storage_filename, usuarios, GCP_PROJECT_ID)
