@@ -1,5 +1,4 @@
 .env
-credenciales.json
 Carga_organizaciones.py
 fields.py
 get_extra_field_organizations.py

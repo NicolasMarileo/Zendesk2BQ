@@ -19,7 +19,7 @@ def load_incremental_to_bigquery(memberships):
     ]
     df_new = df_new[expected_cols]
 
-    client = bigquery.Client()
+    client = bigquery.Client(project=PROJECT_ID)
 
     # Leer tabla actual desde BigQuery
     query = f"""
