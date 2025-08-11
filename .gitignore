@@ -3,7 +3,6 @@ Carga_organizaciones.py
 fields.py
 get_extra_field_organizations.py
 get_organizations.py
-main.py
 main2.py
 main3.py
 membership.py
